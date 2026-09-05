@@ -351,6 +351,21 @@ jobs:
           }
 
           Write-Host "Source verification passed."
+   
+      - name: Generate ReShade version header
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 `
+            res\version.h `
+            -config "Release" `
+            -platform "x64"
+
+          if (-not (Test-Path "res\version.h")) {
+            throw "ERROR: res\version.h was not generated."
+          }
+
+          Write-Host "===== GENERATED VERSION HEADER ====="
+          Get-Content "res\version.h"
 
       - name: Build ReShade solution
         shell: pwsh

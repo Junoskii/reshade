@@ -352,7 +352,7 @@ jobs:
 
           Write-Host "Source verification passed."
    
-            - name: Generate ReShade version header
+        - name: Generate ReShade version header
         shell: pwsh
         run: |
           @'

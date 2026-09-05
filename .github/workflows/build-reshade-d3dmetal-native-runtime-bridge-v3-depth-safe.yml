@@ -352,13 +352,21 @@ jobs:
 
           Write-Host "Source verification passed."
    
-      - name: Generate ReShade version header
+            - name: Generate ReShade version header
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File tools\update_version.ps1 `
-            res\version.h `
-            -config "Release" `
-            -platform "x64"
+          @'
+          #pragma once
+
+          #define VERSION_FULL 6.8.0.1
+          #define VERSION_MAJOR 6
+          #define VERSION_MINOR 8
+          #define VERSION_REVISION 0
+          #define VERSION_BUILD 1
+
+          #define VERSION_STRING_FILE "6.8.0.1"
+          #define VERSION_STRING_PRODUCT "6.8.0 UNOFFICIAL"
+          '@ | Set-Content -Path "res\version.h" -Encoding ascii
 
           if (-not (Test-Path "res\version.h")) {
             throw "ERROR: res\version.h was not generated."
@@ -366,6 +374,11 @@ jobs:
 
           Write-Host "===== GENERATED VERSION HEADER ====="
           Get-Content "res\version.h"
+
+          $version = Get-Content "res\version.h" -Raw
+          if ($version -notmatch 'VERSION_STRING_PRODUCT "6\.8\.0 UNOFFICIAL"') {
+            throw "ERROR: ReShade version is not 6.8.0."
+          }
 
       - name: Build ReShade solution
         shell: pwsh

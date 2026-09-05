@@ -1,5 +1,4 @@
-name: Build ReShade D3DMetal Native Runtime Bridge v3.1 Depth-Safe Path-Fixed x64
-
+name: Build ReShade D3DMetal Native Runtime Bridge v3.2 Add-on Capable Depth-Safe x64
 on:
   workflow_dispatch:
 
@@ -159,60 +158,82 @@ jobs:
           write(rel, s)
 
           # 5) Add a DXGI swap-chain constructor backed by private non-COM D3D12 implementation objects
+          #    and keep the external ReShade add-on manager alive for the private runtime lifetime.
           rel = 'source/dxgi/dxgi_swapchain.hpp'
           s = read(rel)
+
           s = replace_once(
               s,
               'class D3D12CommandQueue;\nnamespace reshade::api { enum class device_api; struct swapchain; }',
               'class D3D12CommandQueue;\nstruct ID3D12Device;\nstruct ID3D12CommandQueue;\nnamespace reshade::api { enum class device_api; struct swapchain; }\nnamespace reshade::d3d12 { class device_impl; class command_queue_impl; }',
               'header forward declarations')
+
           s = replace_once(
               s,
               '\tDXGISwapChain(IDXGIFactory *factory, D3D12CommandQueue *command_queue, IDXGISwapChain3 *original);\n',
               '\tDXGISwapChain(IDXGIFactory *factory, D3D12CommandQueue *command_queue, IDXGISwapChain3 *original);\n\tDXGISwapChain(IDXGIFactory *factory, ID3D12Device *device, ID3D12CommandQueue *command_queue, IDXGISwapChain3 *original);\n',
               'native bridge constructor declaration')
+
           s = replace_once(
               s,
               '\tconst reshade::api::device_api _direct3d_version;\n\n\tIDXGIFactory *const _parent_factory;',
               '\tconst reshade::api::device_api _direct3d_version;\n\n\t// Private implementation objects used only by ReShade. These are never returned through COM.\n\treshade::d3d12::device_impl *const _owned_d3d12_device_impl;\n\treshade::d3d12::command_queue_impl *const _owned_d3d12_command_queue_impl;\n\treshade::d3d12::command_queue_impl *const _direct3d_command_queue_impl;\n\n\tIDXGIFactory *const _parent_factory;',
               'bridge members')
+
           write(rel, s)
-          
+
           rel = 'source/dxgi/dxgi_swapchain.cpp'
           s = read(rel)
-          # Add member initializers to D3D10, D3D11, D3D12 constructors
+
+          # Give the bridge direct access to the ReShade add-on manager.
+          s = replace_once(
+              s,
+              '#include "dxgi_swapchain.hpp"\n',
+              '#include "dxgi_swapchain.hpp"\n#include "addon_manager.hpp"\n',
+              'add-on manager include')
+
+          # Add member initializers to D3D10, D3D11, D3D12 constructors.
           s = replace_once(
               s,
               '\t_direct3d_version(reshade::api::device_api::d3d10),\n\t_parent_factory(factory),',
               '\t_direct3d_version(reshade::api::device_api::d3d10),\n\t_owned_d3d12_device_impl(nullptr),\n\t_owned_d3d12_command_queue_impl(nullptr),\n\t_direct3d_command_queue_impl(nullptr),\n\t_parent_factory(factory),',
               'd3d10 member initializers')
+
           s = replace_once(
               s,
               '\t_direct3d_version(reshade::api::device_api::d3d11),\n\t_parent_factory(factory),',
               '\t_direct3d_version(reshade::api::device_api::d3d11),\n\t_owned_d3d12_device_impl(nullptr),\n\t_owned_d3d12_command_queue_impl(nullptr),\n\t_direct3d_command_queue_impl(nullptr),\n\t_parent_factory(factory),',
               'd3d11 member initializers')
+
           s = replace_once(
               s,
               '\t_direct3d_version(reshade::api::device_api::d3d12),\n\t_parent_factory(factory),\n\t_impl(new reshade::d3d12::swapchain_impl(command_queue->_device, original))',
               '\t_direct3d_version(reshade::api::device_api::d3d12),\n\t_owned_d3d12_device_impl(nullptr),\n\t_owned_d3d12_command_queue_impl(nullptr),\n\t_direct3d_command_queue_impl(command_queue),\n\t_parent_factory(factory),\n\t_impl(new reshade::d3d12::swapchain_impl(command_queue->_device, original))',
               'proxy d3d12 member initializers')
+
+          # Keep the existing proxy constructor unchanged, but replace the native bridge constructor
+          # with an add-on-capable private runtime.
           s = replace_once(
               s,
               '\treshade::create_effect_runtime(_impl, command_queue);\n\ton_init(false);\n}\nDXGISwapChain::~DXGISwapChain()',
-              '\treshade::create_effect_runtime(_impl, _direct3d_command_queue_impl);\n\ton_init(false);\n}\nDXGISwapChain::DXGISwapChain(IDXGIFactory *factory, ID3D12Device *device, ID3D12CommandQueue *command_queue, IDXGISwapChain3 *original) :\n\t_orig(original),\n\t_interface_version(3),\n\t_direct3d_device(device),\n\t_direct3d_command_queue(command_queue),\n\t_direct3d_version(reshade::api::device_api::d3d12),\n\t_owned_d3d12_device_impl(new reshade::d3d12::device_impl(device)),\n\t_owned_d3d12_command_queue_impl(new reshade::d3d12::command_queue_impl(_owned_d3d12_device_impl, command_queue, true)),\n\t_direct3d_command_queue_impl(_owned_d3d12_command_queue_impl),\n\t_parent_factory(factory),\n\t_impl(new reshade::d3d12::swapchain_impl(_owned_d3d12_device_impl, original))\n{\n\tassert(_orig != nullptr && _direct3d_device != nullptr && _direct3d_command_queue != nullptr && _direct3d_command_queue_impl != nullptr && _parent_factory != nullptr);\n\t_parent_factory->AddRef();\n\t_direct3d_device->AddRef();\n\t_direct3d_command_queue->AddRef();\n\n\tfor (size_t i = 0; i < std::size(_direct3d_command_queue_per_back_buffer); ++i)\n\t\t_direct3d_command_queue_per_back_buffer[i] = _direct3d_command_queue;\n\n\tDXGISwapChain *const swapchain_proxy = this;\n\t_orig->SetPrivateData(__uuidof(DXGISwapChain), sizeof(swapchain_proxy), &swapchain_proxy);\n\n\treshade::log::message(reshade::log::level::info, "D3DMetal native runtime bridge: ReShade runtime is hosted by private non-COM D3D12 implementation objects.");\n\treshade::create_effect_runtime(_impl, _direct3d_command_queue_impl);\n\ton_init(false);\n}\nDXGISwapChain::~DXGISwapChain()',
+              '\treshade::create_effect_runtime(_impl, _direct3d_command_queue_impl);\n\ton_init(false);\n}\nDXGISwapChain::DXGISwapChain(IDXGIFactory *factory, ID3D12Device *device, ID3D12CommandQueue *command_queue, IDXGISwapChain3 *original) :\n\t_orig(original),\n\t_interface_version(3),\n\t_direct3d_device(device),\n\t_direct3d_command_queue(command_queue),\n\t_direct3d_version(reshade::api::device_api::d3d12),\n\t_owned_d3d12_device_impl(new reshade::d3d12::device_impl(device)),\n\t_owned_d3d12_command_queue_impl(new reshade::d3d12::command_queue_impl(_owned_d3d12_device_impl, command_queue, true)),\n\t_direct3d_command_queue_impl(_owned_d3d12_command_queue_impl),\n\t_parent_factory(factory),\n\t_impl(new reshade::d3d12::swapchain_impl(_owned_d3d12_device_impl, original))\n{\n\tassert(_orig != nullptr && _direct3d_device != nullptr && _direct3d_command_queue != nullptr && _direct3d_command_queue_impl != nullptr && _parent_factory != nullptr);\n\t_parent_factory->AddRef();\n\t_direct3d_device->AddRef();\n\t_direct3d_command_queue->AddRef();\n\n\tfor (size_t i = 0; i < std::size(_direct3d_command_queue_per_back_buffer); ++i)\n\t\t_direct3d_command_queue_per_back_buffer[i] = _direct3d_command_queue;\n\n\tDXGISwapChain *const swapchain_proxy = this;\n\t_orig->SetPrivateData(__uuidof(DXGISwapChain), sizeof(swapchain_proxy), &swapchain_proxy);\n\n#if RESHADE_ADDON >= 2\n\t// Keep the external add-on manager alive for the full lifetime of the private ReShade runtime.\n\treshade::load_addons();\n\n\t// The private implementation objects are the ReShade-facing device and queue.\n\treshade::invoke_addon_event<reshade::addon_event::init_device>(_owned_d3d12_device_impl);\n\treshade::invoke_addon_event<reshade::addon_event::init_command_queue>(_owned_d3d12_command_queue_impl);\n#endif\n\n\treshade::log::message(reshade::log::level::info, "D3DMetal native runtime bridge: ReShade runtime is hosted by private non-COM D3D12 implementation objects.");\n\treshade::log::message(reshade::log::level::info, "D3DMetal native runtime bridge: external add-on manager enabled for private runtime.");\n\n\treshade::create_effect_runtime(_impl, _direct3d_command_queue_impl);\n\ton_init(false);\n}\nDXGISwapChain::~DXGISwapChain()',
               'native bridge constructor definition')
+
           s = replace_once(
               s,
-              '\tcase reshade::api::device_api::d3d12:\n\t\tdelete static_cast<reshade::d3d12::swapchain_impl *>(_impl);\n\t\tbreak;\n\t}\n\n\t// Release the explicit reference',
               '\tcase reshade::api::device_api::d3d12:\n\t\tdelete static_cast<reshade::d3d12::swapchain_impl *>(_impl);\n\t\tbreak;\n\t}\n\n\t// The queue implementation unregisters itself from the device implementation, so destroy in this order.\n\tdelete _owned_d3d12_command_queue_impl;\n\tdelete _owned_d3d12_device_impl;\n\n\t// Release the explicit reference',
+              '\tcase reshade::api::device_api::d3d12:\n\t\tdelete static_cast<reshade::d3d12::swapchain_impl *>(_impl);\n\t\tbreak;\n\t}\n\n#if RESHADE_ADDON >= 2\n\t// Notify external add-ons before their private device and queue objects disappear.\n\treshade::invoke_addon_event<reshade::addon_event::destroy_command_queue>(_owned_d3d12_command_queue_impl);\n\treshade::invoke_addon_event<reshade::addon_event::destroy_device>(_owned_d3d12_device_impl);\n#endif\n\n\t// The queue implementation unregisters itself from the device implementation, so destroy in this order.\n\tdelete _owned_d3d12_command_queue_impl;\n\tdelete _owned_d3d12_device_impl;\n\n#if RESHADE_ADDON >= 2\n\t// Release the add-on-manager reference owned by the private bridge runtime.\n\treshade::unload_addons();\n#endif\n\n\t// Release the explicit reference',
               'bridge destruction')
-          # Replace all assumptions that the queue implementation is also a COM proxy
+
+          # Replace all assumptions that the queue implementation is also a COM proxy.
           s = s.replace('static_cast<D3D12CommandQueue *>(_direct3d_command_queue)->_mutex', '_direct3d_command_queue_impl->_mutex')
           s = s.replace('static_cast<D3D12CommandQueue *>(_direct3d_command_queue)->flush_immediate_command_list();', '_direct3d_command_queue_impl->flush_immediate_command_list();')
           s = s.replace('static_cast<D3D12CommandQueue *>(_direct3d_command_queue),\n\t\t\t_impl,', '_direct3d_command_queue_impl,\n\t\t\t_impl,')
           s = s.replace('static_cast<D3D12CommandQueue *>(_direct3d_command_queue), _impl);', '_direct3d_command_queue_impl, _impl);')
+
           if 'static_cast<D3D12CommandQueue *>(_direct3d_command_queue)' in s:
               raise RuntimeError('unconverted D3D12 command queue proxy cast remains')
+
           write(rel, s)
           
           # 6) When a native D3D12 queue creates a swap chain, build the private runtime bridge
@@ -245,11 +266,18 @@ jobs:
                   'captured native ID3D12Device and ID3D12CommandQueue',
                   'new DXGISwapChain(factory, native_device.get(), native_command_queue.get(), swapchain3.get())',
               ],
-              'source/dxgi/dxgi_swapchain.cpp': [
+                  'source/dxgi/dxgi_swapchain.cpp': [
                   'private non-COM D3D12 implementation objects',
                   'new reshade::d3d12::device_impl(device)',
                   'new reshade::d3d12::command_queue_impl(_owned_d3d12_device_impl, command_queue, true)',
+                  'reshade::load_addons();',
+                  'reshade::invoke_addon_event<reshade::addon_event::init_device>(_owned_d3d12_device_impl);',
+                  'reshade::invoke_addon_event<reshade::addon_event::init_command_queue>(_owned_d3d12_command_queue_impl);',
+                  'external add-on manager enabled for private runtime.',
                   'reshade::create_effect_runtime(_impl, _direct3d_command_queue_impl);',
+                  'reshade::invoke_addon_event<reshade::addon_event::destroy_command_queue>(_owned_d3d12_command_queue_impl);',
+                  'reshade::invoke_addon_event<reshade::addon_event::destroy_device>(_owned_d3d12_device_impl);',
+                  'reshade::unload_addons();',
                   '_direct3d_command_queue_impl->flush_immediate_command_list();',
               ],
               'source/d3d12/d3d12_impl_command_queue.cpp': [
@@ -437,6 +465,7 @@ jobs:
             "D3DMetal native runtime bridge: captured native ID3D12Device and ID3D12CommandQueue",
             "D3DMetal native runtime bridge: ReShade runtime is hosted by private non-COM D3D12 implementation objects",
             "D3DMetal native runtime bridge: GPU timestamp queries disabled",
+            "D3DMetal native runtime bridge: external add-on manager enabled for private runtime.",
             "D3DMetal depth-safe bridge: Generic Depth present callback disabled after null-object symbolication."
           )
           foreach ($marker in $required) {
@@ -453,7 +482,7 @@ jobs:
           $hash = Get-FileHash $dll -Algorithm SHA256
           $file = Get-Item $dll
 
-          "Build: D3DMetal Native D3D12 Runtime Bridge v3.1 Depth-Safe Path-Fixed ReShade" |
+                    "Build: D3DMetal Native D3D12 Runtime Bridge v3.2 Add-on Capable Depth-Safe ReShade" |
             Set-Content build-info.txt
           "Repository: $env:GITHUB_REPOSITORY" |
             Add-Content build-info.txt
@@ -483,15 +512,17 @@ jobs:
             Add-Content build-info.txt
           "Limitation: Depth-dependent ReShade effects are unavailable in this test build" |
             Add-Content build-info.txt
-          "Test stage: Core ReShade only; keep all addon64 files disabled" |
+          "Feature: External .addon64 loading enabled through the private ReShade runtime" |
             Add-Content build-info.txt
-
-          Get-Content build-info.txt
+          "Patch: Private bridge owns an add-on-manager reference for its full runtime lifetime" |
+            Add-Content build-info.txt
+          "Patch: Private device and command queue receive ReShade add-on lifecycle events" |
+            Add-Content build-info.txt
 
       - name: Upload native runtime bridge
         uses: actions/upload-artifact@v4
         with:
-          name: reshade-d3dmetal-native-runtime-bridge-v3-1-depth-safe-path-fixed-${{ github.sha }}
+          name: reshade-d3dmetal-native-runtime-bridge-v3-2-addon-capable-depth-safe-${{ github.sha }}
           path: |
             ReShade64.dll
             build-info.txt
